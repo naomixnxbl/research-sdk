@@ -17,6 +17,14 @@ from time import perf_counter, process_time
 
 import research_sdk.planners as planner_package
 from research_sdk.config import ROBOT_RADIUS_MM
+from research_sdk.planners.common import StepRecorder
+from research_sdk.ui.runtime import PlannedRobotPath, ResearchRuntime
+from research_sdk.ui.scenarios import Scenario, ScenarioObstacle
+from research_sdk.world.map.voronoi.voronoi_generator import generate_bounded_voronoi_map
+from research_sdk.world.scene import PlanningObstacle
+
+Point = tuple[float, float]
+Edge = tuple[Point, Point]
 
 
 class SessionState(str, Enum):
@@ -86,6 +94,61 @@ def discover_planners() -> dict[str, type]:
                 continue
             found[f"{name} ({module_info.name.rsplit('.', 1)[-1]})"] = candidate
     return dict(sorted(found.items()))
+
+
+def planner_debug_geometry(
+    label: str,
+    recorder: StepRecorder,
+    obstacles: tuple[ScenarioObstacle, ...],
+) -> tuple[tuple[Point, ...], tuple[Edge, ...]]:
+    """Return the sampled nodes/edges behind one planner's last ``plan()`` call.
+
+    Shared by the Scenario Planner's offline preview and the Execution
+    Console's "Map" layer toggle so both draw the same debug graph. Voronoi
+    has no ``StepRecorder`` sample/edge steps of its own -- its graph is
+    rebuilt directly from ``generate_bounded_voronoi_map`` instead.
+    """
+    nodes: list[Point] = []
+    edges: list[Edge] = []
+    for step in recorder.steps:
+        if step["kind"] == "sample" and step.get("free"):
+            nodes.append(tuple(step["point"]))
+        elif step["kind"] == "edge_test" and step.get("accepted"):
+            first = tuple(step["a"])
+            second = tuple(step["b"])
+            edges.append((first, second))
+            nodes.extend((first, second))
+    if "Voronoi" in label:
+        planning_obstacles = tuple(
+            PlanningObstacle(
+                robot_id=obstacle.obstacle_id,
+                isYellow=obstacle.is_yellow,
+                pos_mm=obstacle.position_mm,
+                radius_mm=obstacle.radius_mm,
+            )
+            for obstacle in obstacles
+        )
+        voronoi_map = generate_bounded_voronoi_map(obstacles=planning_obstacles)
+        by_id = {node.id: (node.x, node.y) for node in voronoi_map.nodes}
+        nodes = list(by_id.values())
+        edges = [
+            (by_id[edge.start_id], by_id[edge.end_id])
+            for edge in voronoi_map.edges
+            if edge.start_id in by_id and edge.end_id in by_id
+        ]
+    return tuple(dict.fromkeys(nodes)), tuple(edges)
+
+
+@dataclass(frozen=True, slots=True)
+class PlannerPreview:
+    paths: tuple[PlannedRobotPath, ...]
+    # None means this planner has no real map-vs-search split available
+    # (no StepRecorder support) -- see PlannerPreviewBuilder's comment for
+    # why that must not be papered over with a fabricated number.
+    map_time_ms: float | None
+    planning_time_ms: float
+    nodes: tuple[Point, ...] = ()
+    edges: tuple[Edge, ...] = ()
 
 
 RESULT_COLUMNS_A = (
@@ -202,6 +265,70 @@ class RunMetrics:
             "number_of_collisions": self.number_of_collisions,
             "resources_used": self._csv_value((cpu_end - self.cpu_started_at) * 1000.0),
         }
+
+
+class PlannerPreviewBuilder:
+    """Backend half of the Scenario Planner's Plan button.
+
+    Runs one planner against a scenario, wires a fresh ``StepRecorder``,
+    and packages the result into a ``PlannerPreview`` plus ``RunMetrics`` --
+    kept out of the Qt widget so ``ScenarioPlannerPage`` only has to take
+    the result and update labels/canvas with it.
+    """
+
+    def __init__(self, runtime: ResearchRuntime) -> None:
+        self.runtime = runtime
+
+    def build(
+        self, scenario: Scenario, planner_cls: type, label: str
+    ) -> tuple[PlannerPreview, RunMetrics, str]:
+        """Plan once with ``planner_cls`` and return (preview, metrics, failure_note)."""
+        recorder = StepRecorder()
+        self.runtime.set_planner(planner_cls, record=recorder)
+        failure_note = ""
+        try:
+            paths = self.runtime.plan(scenario)
+        except Exception as exc:
+            paths = ()
+            failure_note = f" · {label}: {exc}"
+        else:
+            if self.runtime.last_plan_failures:
+                failed_ids = ", ".join(
+                    f"{'Y' if p.is_yellow else 'B'}{p.robot_id}" for p in paths if p.failed
+                )
+                failure_note = (
+                    f" · {self.runtime.last_plan_failures} robot(s) found no route "
+                    f"({failed_ids}) -- flagged red, held in place"
+                )
+        planning_ms = sum(self.runtime.last_plan_durations_ms)
+        nodes, edges = planner_debug_geometry(label, recorder, tuple(scenario.obstacles))
+        if recorder.map_time_ms is not None:
+            # A full build happened this call and logged into StepRecorder --
+            # all three planners support this now (VisibilityGraph, PRM, and
+            # VoronoiDijkstraPlanner via a coarser two-timestamp split, see
+            # voronoi_dijkstra.py's plan() docstring) -- a real map-vs-search
+            # split.
+            map_ms: float | None = recorder.map_time_ms
+            search_ms = (
+                recorder.search_time_ms
+                if recorder.search_time_ms is not None
+                else max(0.0, planning_ms - map_ms)
+            )
+        else:
+            # This call took a direct-line-of-sight or reused-previous-path
+            # shortcut and never built anything, so there's genuinely no map
+            # cost to report -- not a planner limitation. Show the honest
+            # total instead of fabricating a split (see decision 6 in
+            # docs/decisions/0005-parallel-planner-execution.md for why a
+            # fabricated split is actively wrong, not just imprecise).
+            map_ms = None
+            search_ms = planning_ms
+        run_metrics = RunMetrics()
+        run_metrics.record_pipeline(0.0, map_ms or 0.0)
+        run_metrics.record_planning((search_ms,), failures=self.runtime.last_plan_failures)
+        run_metrics.finish(completed=False)
+        preview = PlannerPreview(paths, map_ms, search_ms, nodes, edges)
+        return preview, run_metrics, failure_note
 
 
 def export_results(
