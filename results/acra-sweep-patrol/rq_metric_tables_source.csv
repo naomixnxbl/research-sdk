@@ -1,0 +1,16 @@
+planner,condition,n,collision_free_rate,collision_episodes,max_collision,exec_time_mean_ms,total_replan_time_ms,replans_mean,avg_replan_duration_ms,replan_failures
+voronoi,once,200,33.0,260,7,3.278,0.0,0.0,,0
+voronoi,cycle,200,76.0,90,7,169.445,166.2,42.645,3.897,297
+voronoi,event h=0,200,77.0,73,5,28.653,25.43,5.905,4.306,147
+voronoi,event h=50,200,88.0,31,3,32.3,28.53,9.95,2.867,150
+voronoi,event h=150,200,92.0,17,2,47.964,43.39,22.73,1.909,383
+prm,once,200,39.5,226,7,5.204,0.0,0.0,,0
+prm,cycle,200,69.5,73,3,235.735,230.27,29.975,7.682,1659
+prm,event h=0,200,71.0,73,4,30.388,25.28,2.925,8.643,1256
+prm,event h=50,200,81.5,49,3,33.313,27.3,3.22,8.478,1794
+prm,event h=150,200,77.5,59,3,36.396,29.63,3.54,8.369,4110
+visibility,once,200,39.0,205,6,7.531,0.0,0.0,,0
+visibility,cycle,200,58.5,113,4,445.446,437.88,47.455,9.227,2408
+visibility,event h=0,200,62.0,104,5,96.364,88.79,8.905,9.971,2086
+visibility,event h=50,200,64.0,92,4,96.522,87.99,9.2,9.564,3237
+visibility,event h=150,200,67.5,93,4,82.038,72.44,7.855,9.222,5956
